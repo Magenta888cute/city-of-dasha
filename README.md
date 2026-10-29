@@ -13,4 +13,6 @@ and winter ❄️.
 
 Works on iPad, iPhone and computers. On iPad or iPhone, tap Share → *Add to Home Screen* to play it like an app.
 
+Moving to a new iPad or phone? *Settings → Move my save* copies a save code you can paste into the game on the other device.
+
 This repository holds the built game: `index.html` contains all of the code.

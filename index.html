@@ -406,6 +406,12 @@ ul.help li { margin: 10px 0; font-size: clamp(15px, 1vmin + 11px, 18px); font-we
 .btn.dim { opacity: 0.55; filter: grayscale(0.4); font-size: 14px; }
 .closetOpen #quest { display: none; }
 
+/* Move my save (Settings) */
+.moveBox p { margin: 6px 0 10px; font-weight: 600; line-height: 1.4; }
+.moveBox .moveHint { background: #fff; border-radius: 14px; padding: 10px 14px; }
+.moveCode { display: block; width: 100%; box-sizing: border-box; min-height: 88px; margin: 8px 0; padding: 10px 12px; border: 3px solid #ffb3c6; border-radius: 14px; font: 600 13px/1.3 ui-monospace, Menlo, monospace; color: var(--ink); background: #fff; resize: vertical; word-break: break-all; }
+.moveStatus { min-height: 20px; margin: 6px 0 10px; font-weight: 800; color: #c2407a; }
+
 </style>
 </head>
 <body>
@@ -818,11 +824,18 @@ function lampGlow(size) { const s = new THREE.Sprite(LAMP_GLOW_MAT); s.scale.set
    New fields added in future updates get their defaults automatically (mergeDefaults),
    so old saves keep working after every update. */
 
-const GAME_VERSION = 5;
+const GAME_VERSION = 6;
 const SAVE_KEY = 'cityOfDasha.save';
 
 // In-game "What's new" list. For every update: bump GAME_VERSION and add an entry on top.
 const UPDATE_LOG = [
+  {
+    v: 6, date: 'October 2026', title: 'Your island can move house!',
+    items: [
+      '📦 Move my save, in ⚙️ Settings: copy a save code here and paste it where the game opens next, and your whole island comes along: friends, house, pets, charms, photos and all',
+      '🏠 City of Dasha has a new home at magenta888cute.github.io/city-of-dasha. At the old address, one tap flies your island over',
+    ],
+  },
   {
     v: 5, date: 'October 2026', title: 'A shopping mall, charms and spring!',
     items: [
@@ -959,7 +972,7 @@ const Save = {
     return false;
   },
   write() {
-    if (this.resetting) return;
+    if (this.resetting || window.SAVE_LOCK) return; // SAVE_LOCK: a moved-in save is being put in place (transfer.js)
     try { localStorage.setItem(SAVE_KEY, JSON.stringify(S)); } catch (e) { console.warn('Could not save', e); }
     this.dirty = false;
   },
@@ -974,6 +987,200 @@ const Save = {
     S = defaultSave();
   },
 };
+
+</script>
+<script>
+'use strict';
+/* City of Dasha — transfer.js
+   "Move my save" (in Settings). The island is saved inside the browser, for this web address only.
+   This packs every saved key into one SAVE CODE that can be copied here and pasted where the game
+   opens next (its new address, another iPad or phone), and reads such a code back in. Opened at an
+   old address, it also offers one tap that flies a small-enough save over with a #move=<code> link.
+   Loads right after save.js so a #move= link is handled before the game reads its save. */
+
+const Transfer = {
+  game: 'city-of-dasha',
+  tag: 'DASHA',
+  keys: [SAVE_KEY, 'cityOfDasha.photos', 'cityOfDasha.tees', 'cityOfDasha.eggs'],
+  mainKey: SAVE_KEY,
+  // old address -> where the game lives now (the fly button only shows at these addresses)
+  homes: {
+    'chen168.github.io': 'https://magenta888cute.github.io/city-of-dasha/',
+    'old.localhost': location.protocol + '//new.localhost:' + location.port + location.pathname, // for testing
+  },
+  LINK_MAX: 40000, // the longest save code that still fits in a link on every browser
+  MOVED_FLAG: 'cityOfDasha.moved',
+  packed: null, packErr: null, packing: null,
+
+  looksRight(main) { return !!main && typeof main === 'object' && typeof main.coins === 'number'; },
+  hasProgress(main) { return !!main && ((main.coins || 0) > 0 || (main.stats && main.stats.walked > 0) || (main.friends && main.friends.length > 0) || (main.placed && main.placed.length > 0)); },
+  currentMain() { try { return JSON.parse(localStorage.getItem(this.mainKey)); } catch (e) { return null; } },
+  standalone() { return navigator.standalone === true || !!(window.matchMedia && matchMedia('(display-mode: standalone)').matches); },
+
+  /* ---------- bytes <-> text ---------- */
+  toB64(bytes) { let s = ''; for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000)); return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''); },
+  fromB64(s) { s = s.replace(/-/g, '+').replace(/_/g, '/'); while (s.length % 4) s += '='; const bin = atob(s); const out = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i); return out; },
+  async squeeze(bytes, dir) { // gzip ('in') or un-gzip ('out') with the browser's built-in streams
+    const cs = new (dir === 'in' ? CompressionStream : DecompressionStream)('gzip');
+    const w = cs.writable.getWriter(); w.write(bytes); w.close();
+    return new Uint8Array(await new Response(cs.readable).arrayBuffer());
+  },
+
+  /* ---------- pack this browser's save into a code ---------- */
+  async pack() {
+    if (typeof Save !== 'undefined' && !window.SAVE_LOCK) Save.write(); // the very latest island
+    const data = {};
+    for (const k of this.keys) { let v = null; try { v = localStorage.getItem(k); } catch (e) { /* ignore */ } if (v !== null) data[k] = v; }
+    if (!data[this.mainKey]) throw new Error('There is no saved island here yet.');
+    const bytes = new TextEncoder().encode(JSON.stringify({ game: this.game, v: 1, when: Date.now(), data }));
+    let body = bytes, kind = 'p';
+    if (typeof CompressionStream !== 'undefined') { try { body = await this.squeeze(bytes, 'in'); kind = 'g'; } catch (e) { body = bytes; kind = 'p'; } }
+    return this.tag + '1' + kind + '.' + this.toB64(body);
+  },
+  prepack() { // start packing when the panel opens, so a tap on Copy can reach the clipboard right away
+    this.packed = null; this.packErr = null;
+    this.packing = this.pack().then((c) => { this.packed = c; }, (e) => { this.packErr = e; });
+    return this.packing;
+  },
+
+  /* ---------- read a code (throws a friendly message when it is not one of ours) ---------- */
+  async unpack(code) {
+    code = String(code || '').replace(/\s+/g, '');
+    const m = /^([A-Z]+)1([gp])\.([A-Za-z0-9_-]+)$/.exec(code);
+    if (!m) throw new Error('That does not look like a save code. Copy the whole code and try again.');
+    if (m[1] !== this.tag) throw new Error('That save code is for a different game.');
+    let bytes = this.fromB64(m[3]);
+    if (m[2] === 'g') {
+      if (typeof DecompressionStream === 'undefined') throw new Error('This browser is too old to read the code. Please update it.');
+      bytes = await this.squeeze(bytes, 'out');
+    }
+    let obj = null;
+    try { obj = JSON.parse(new TextDecoder().decode(bytes)); } catch (e) { obj = null; }
+    if (!obj || obj.game !== this.game || !obj.data || typeof obj.data !== 'object') throw new Error('That save code is for a different game.');
+    let main = null;
+    try { main = JSON.parse(obj.data[this.mainKey]); } catch (e) { main = null; }
+    if (!this.looksRight(main)) throw new Error('The island inside this code is broken.');
+    obj.main = main;
+    return obj;
+  },
+
+  /* ---------- put a code's save into this browser (the page reloads right after) ---------- */
+  apply(obj) {
+    window.SAVE_LOCK = true; // the running game must not write its old island over the new one
+    for (const k of this.keys) {
+      try { if (typeof obj.data[k] === 'string') localStorage.setItem(k, obj.data[k]); else localStorage.removeItem(k); } catch (e) { console.warn('could not store ' + k, e); }
+    }
+    try { sessionStorage.setItem(this.MOVED_FLAG, '1'); } catch (e) { /* ignore */ }
+  },
+  reload() { history.replaceState(null, '', location.pathname + location.search); location.reload(); },
+
+  /* ---------- an incoming #move= link, handled before the game starts ---------- */
+  handleLink() {
+    const m = /[#&]move=([A-Za-z0-9_.-]+)/.exec(location.hash || '');
+    if (!m) return false;
+    window.SAVE_LOCK = true;
+    const ov = this.overlay('✈️ Your island is landing here…');
+    this.unpack(m[1]).then((obj) => {
+      if (this.hasProgress(this.currentMain()) && !confirm('There is already an island saved here. Replace it with the one that just arrived?')) throw new Error('kept');
+      this.apply(obj);
+      this.reload();
+    }).catch((e) => {
+      window.SAVE_LOCK = false;
+      ov.remove();
+      history.replaceState(null, '', location.pathname + location.search);
+      if (e.message !== 'kept') alert('Could not move the save: ' + e.message);
+    });
+    return true;
+  },
+  welcome() {
+    try { if (!sessionStorage.getItem(this.MOVED_FLAG)) return; sessionStorage.removeItem(this.MOVED_FLAG); } catch (e) { return; }
+    setTimeout(() => this.note('🎉 Your island is here! Welcome back, Dasha.'), 1500);
+  },
+
+  /* ---------- little bits of screen that work before the game's own UI exists ---------- */
+  overlay(text) {
+    const d = document.createElement('div');
+    d.style.cssText = 'position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;background:#ffd6e6;color:#8a2c5a;font:900 clamp(22px,4vw,34px)/1.3 system-ui,sans-serif;text-align:center;padding:24px;';
+    d.textContent = text;
+    document.body.appendChild(d);
+    return d;
+  },
+  note(text) {
+    const d = document.createElement('div');
+    d.style.cssText = 'position:fixed;left:50%;top:calc(env(safe-area-inset-top,0px) + 14px);transform:translateX(-50%);z-index:9998;background:#fff;color:#8a2c5a;border:3px solid #ff5c9a;border-radius:999px;padding:10px 20px;font:900 18px system-ui,sans-serif;box-shadow:0 6px 18px rgba(0,0,0,.18);transition:opacity .5s;max-width:92vw;text-align:center;';
+    d.textContent = text;
+    document.body.appendChild(d);
+    setTimeout(() => { d.style.opacity = '0'; setTimeout(() => d.remove(), 600); }, 4500);
+  },
+
+  /* ---------- the Settings page ---------- */
+  copyTo(out, st, code) { // clipboard first (must be called straight from the tap), then the old-school way
+    out.value = code; out.style.display = '';
+    const fallback = () => {
+      let ok = false;
+      try { out.focus(); out.select(); out.setSelectionRange(0, code.length); ok = document.execCommand('copy'); } catch (e) { ok = false; }
+      st.innerHTML = ok ? '✅ Copied! Now paste it where the game opens next.' : 'Select the code above, copy it, and paste it where the game opens next.';
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(code).then(() => { st.innerHTML = '✅ Copied! Now paste it where the game opens next.'; }, fallback);
+    else fallback();
+  },
+  openPanel() {
+    this.prepack();
+    UI.openPanel({ name: 'move', title: '📦 Move my save', render: (body) => {
+      body.innerHTML = '';
+      const box = h('div', 'moveBox');
+      body.appendChild(box);
+      const home = this.homes[location.hostname];
+      const shortHome = home ? home.replace(/^https?:\/\//, '').replace(/\/$/, '') : '';
+      box.appendChild(h('p', '', 'Your island is saved inside this browser, for this web address only. A <b>save code</b> carries it to the game\'s new address, or to another iPad or phone.'));
+      if (home && !this.standalone()) {
+        box.appendChild(h('h3', '', '✈️ Fly to the new home'));
+        box.appendChild(h('p', '', 'City of Dasha moved to <b>' + shortHome + '</b>. One tap carries your island there, and you keep playing at the new address.'));
+        const st = h('div', 'moveStatus');
+        box.appendChild(UI.button('✈️ Fly my save to the new home', 'pink', async () => {
+          st.textContent = 'Packing up your island…';
+          await this.packing;
+          if (this.packErr) { st.textContent = '😕 ' + this.packErr.message; return; }
+          if (this.packed.length > this.LINK_MAX) { st.innerHTML = 'Your island is too big to fly in one tap (all those photos!). Use the save code below instead.'; return; }
+          st.textContent = '✈️ Off we go!';
+          location.href = home + '#move=' + this.packed;
+        }));
+        box.appendChild(st);
+      } else if (home) {
+        box.appendChild(h('p', 'moveHint', 'City of Dasha moved to <b>' + shortHome + '</b>. Add the new address to your home screen, open it there, and paste your save code into Settings → Move my save.'));
+      }
+      box.appendChild(h('h3', '', '📋 Copy my save code'));
+      box.appendChild(h('p', '', 'Tap Copy here. Then open the game where you want it, go to <b>Settings → Move my save</b>, paste the code and tap Load.'));
+      const out = h('textarea', 'moveCode'); out.readOnly = true; out.style.display = 'none'; out.setAttribute('aria-label', 'Your save code');
+      const st1 = h('div', 'moveStatus');
+      box.appendChild(UI.button('📋 Copy save code', 'pink', async () => {
+        if (this.packed) { this.copyTo(out, st1, this.packed); return; }
+        st1.textContent = 'Packing up your island…';
+        await this.packing;
+        if (this.packErr) { st1.textContent = '😕 ' + this.packErr.message; return; }
+        this.copyTo(out, st1, this.packed);
+      }));
+      box.appendChild(out);
+      box.appendChild(st1);
+      box.appendChild(h('h3', '', '📥 Load a save code'));
+      const inp = h('textarea', 'moveCode'); inp.placeholder = 'Paste a save code here'; inp.setAttribute('aria-label', 'Paste a save code');
+      const st2 = h('div', 'moveStatus');
+      box.appendChild(inp);
+      box.appendChild(UI.button('📥 Load this save', '', async () => {
+        st2.textContent = 'Reading the code…';
+        try {
+          const obj = await this.unpack(inp.value);
+          const go = () => { st2.textContent = '🏝️ Here it comes!'; this.apply(obj); this.reload(); };
+          if (this.hasProgress(this.currentMain())) UI.confirm('Replace the island saved here with the one from the code? The island here will be gone.', go, () => { st2.textContent = ''; }, 'Yes, replace it', 'No, keep it');
+          else go();
+        } catch (e) { st2.textContent = '😕 ' + e.message; }
+      }));
+      box.appendChild(st2);
+    } });
+  },
+};
+
+Transfer.handleLink() || Transfer.welcome();
 
 </script>
 <script>
@@ -9374,6 +9581,7 @@ const UI = {
       const r2 = h('div', 'setBtns');
       r2.appendChild(this.button('📖 How to play', '', () => this.openHelp()));
       r2.appendChild(this.button("🆕 What's new", '', () => this.openNews()));
+      r2.appendChild(this.button('📦 Move my save', '', () => Transfer.openPanel()));
       r2.appendChild(this.button('🔁 Start over', 'danger', () => this.confirm('Start a brand new island? Everything on this island will be gone forever!', () => this.confirm('Are you REALLY sure?', () => { Save.reset(); location.reload(); }, null, 'Yes, start over', 'No'), null, 'Yes', 'No, keep it')));
       body.appendChild(r2);
       body.appendChild(h('p', 'version', 'City of Dasha · version ' + GAME_VERSION + ' · a game by Sasha'));
